@@ -41,14 +41,20 @@ def _connect_postgres():
         user=os.getenv("PGUSER", "postgres"),
         password=os.getenv("PGPASSWORD", "postgres"),
     )
+    # fail with a clear error instead of hanging when the server isn't reachable
+    timeout = int(os.getenv("PGCONNECT_TIMEOUT", "5"))
     try:
         import psycopg  # psycopg 3
 
-        return psycopg.connect(dsn) if dsn else psycopg.connect(**params)
+        if dsn:
+            return psycopg.connect(dsn, connect_timeout=timeout)
+        return psycopg.connect(**params, connect_timeout=timeout)
     except ImportError:
         import psycopg2  # fallback
 
-        return psycopg2.connect(dsn) if dsn else psycopg2.connect(**params)
+        if dsn:
+            return psycopg2.connect(dsn, connect_timeout=timeout)
+        return psycopg2.connect(**params, connect_timeout=timeout)
 
 
 def _query_postgres(sql: str, params, limit: int | None) -> list[dict[str, Any]]:

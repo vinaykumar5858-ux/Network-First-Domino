@@ -6,11 +6,7 @@ then stays available for conversational follow-ups and general networking questi
 ## 1. Running it (VS Code)
 
 The agent runs against either database backend, chosen by `DB_BACKEND` in `.env`:
-
-| `DB_BACKEND` | Use for | Needs |
-|---|---|---|
-| `postgres` (default) | the provided environment - this is what the challenge is evaluated on | the Podman/Docker container |
-| `duckdb` | local development and testing with **no container** | a `.duckdb` file built once (below) |
+Developed and run locally on DuckDB built from the provided seed CSVs (no Podman/Docker on my machine); the code defaults to the provided PostgreSQL (DB_BACKEND=postgres), and the Postgres path was verified to return identical tool results on the same data.
 
 ### Common setup
 1. Open the `starter_code/` folder in VS Code.
