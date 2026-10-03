@@ -1,0 +1,76 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "DuckDB: build from seed CSVs (../db/init)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "scripts.build_duckdb",
+      "args": [
+        "--from-csv",
+        "../db/init",
+        "--force"
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "DuckDB: build demo dataset",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "scripts.build_duckdb",
+      "args": [
+        "--demo",
+        "--force"
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Agent: interactive chat",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Agent: investigate interface_flap example",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "args": [
+        "--investigate",
+        "a1f0c8e2-1b44-4d90-9c31-000000000001"
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Worked example (writes examples/worked_example_output.md)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "examples.worked_example",
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Evaluation (10 anomalies)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "eval.run_eval",
+      "args": [
+        "--limit",
+        "10"
+      ],
+      "cwd": "${workspaceFolder}",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal"
+    }
+  ]
+}
