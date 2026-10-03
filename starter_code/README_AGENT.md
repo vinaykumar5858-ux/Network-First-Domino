@@ -61,37 +61,81 @@ suggested questions. Every answer has a "How I got this" expander with its steps
 ## 2. Architecture and why
 
 ```
-START -> route --investigate--> start_investigation -> investigator <-> execute_tools
-             |                                              |               |
-             |                                              v               |
-             |                                          synthesize -> END   |
-             |--followup / data_question--> start_qa -> qa_agent <----------+
-             |                                            |
-             +--general--> general -> END                 +--> END
+### System overview
+
+```mermaid
+flowchart TB
+    subgraph IF["Interfaces"]
+        direction LR
+        CLI["CLI<br/>main.py"]
+        WEB["Web UI<br/>app.py · Streamlit"]
+        EXP["Worked example<br/>& evaluation"]
+    end
+
+    subgraph AG["LangGraph agent · agent/graph.py"]
+        direction LR
+        GRAPH["State graph<br/>route → investigate / Q&amp;A / general"]
+        MEM[("Checkpointer<br/>conversation memory<br/>per thread")]
+        CAL["Confidence calibration<br/>rule-based guard-rails"]
+    end
+
+    LLM["LLM provider<br/>Gemini · OpenAI · Anthropic<br/>tool calling & structured output"]
+
+    subgraph TL["Read-only tools · agent/tools.py"]
+        direction LR
+        T1["get_anomaly<br/>find_anomalies_in_window"]
+        T2["get_device_details<br/>find_related_devices"]
+        T3["get_device_telemetry<br/>stats + left_baseline_at"]
+        T4["get_device_syslogs"]
+        T5["run_readonly_sql<br/>guarded escape hatch"]
+    end
+
+    subgraph DL["Data layer"]
+        direction LR
+        NORM["anomalies.py<br/>reads JSON model_output"]
+        DBA["db_access.py<br/>schema discovery · read-only"]
+    end
+
+    subgraph DS["Databases · same seed data"]
+        direction LR
+        PG[("PostgreSQL<br/>provided container<br/>DB_BACKEND=postgres")]
+        DUCK[("DuckDB file<br/>built from seed CSVs<br/>DB_BACKEND=duckdb")]
+    end
+
+    IF --> AG
+    GRAPH <--> LLM
+    GRAPH <--> MEM
+    GRAPH --> CAL
+    AG --> TL
+    TL --> DL
+    NORM --> DBA
+    DL --> DS
 ```
 
-| Node | What it does |
-|---|---|
-| `route` | Regex fast path for anomaly ids; otherwise an LLM classifier with structured output (`investigate / followup / data_question / general`). Falls back to a safe default if the classifier fails. |
-| `start_investigation` | Loads the anomaly record deterministically (always needed - not anomaly-specific), handles unknown ids without spending LLM calls, and resets the working memory. |
-| `investigator` | Tool-calling LLM following a hypothesis-driven method (form hypotheses -> gather evidence that confirms or rules out -> stop when more data wouldn't change the answer). It chooses which tools, devices and windows to query. |
-| `execute_tools` | Explicit tool executor (instead of the prebuilt `ToolNode`): runs calls, turns errors into messages the LLM can recover from, and logs every result into an evidence log. |
-| `synthesize` | Structured output (`RCAReport`: root cause, category, evidence items tagged supports/contradicts/context, devices, interfaces, timeframe, alternatives, confidence, gaps, next steps), followed by deterministic **confidence calibration**. |
-| `start_qa` / `qa_agent` | Follow-ups and ad-hoc data questions. Follow-ups get the stored report and raw tool outputs as context and only call tools when the question needs new data. |
-| `general` | Domain-knowledge answers with **no tools bound**, so conceptual questions never hit the database. |
+### Agent decision flow (one user turn)
 
-Why this shape rather than a single ReAct loop:
-- **Different intents need different control flow.** An RCA should end in a structured, calibrated
-  report; a BGP explainer must not touch the DB; a follow-up should reuse context. Routing makes
-  these explicit and testable.
-- **Bounded autonomy.** The LLM decides *what* evidence matters, but the graph enforces step budgets
-  (`MAX_INVESTIGATION_STEPS`, `MAX_QA_STEPS`), always ends investigations in synthesis, and never
-  exposes write access.
-- **Honesty is enforced, not just prompted.** `calibrate()` caps confidence based on what the tools
-  actually returned: no data -> `insufficient` (root cause marked *Undetermined*); one source ->
-  at most `medium`; no evidence supporting the stated cause -> at most `low`. Adjustments are shown
-  in the report.
+```mermaid
+flowchart TD
+    START(["User message"]) --> ROUTE{"route<br/>regex for anomaly id,<br/>else LLM classifier"}
 
+    ROUTE -->|investigate| SI["start_investigation<br/>load anomaly record"]
+    ROUTE -->|"follow-up / data question"| SQ["start_qa<br/>load report + raw evidence"]
+    ROUTE -->|general| GEN["general<br/>domain knowledge,<br/>no tools bound"]
+
+    SI -->|"id not found"| NF(["Reply: anomaly not found"])
+    SI --> INV["investigator<br/>LLM picks devices, windows<br/>and tools to test hypotheses"]
+    INV -->|"tool calls"| EXE["execute_tools<br/>run tools · log evidence ·<br/>errors fed back to LLM"]
+    EXE -->|"more evidence needed"| INV
+    INV -->|"enough evidence"| SYN
+    EXE -->|"step budget reached"| SYN["synthesize<br/>structured RCA report, then<br/>calibrate: cap confidence by<br/>evidence actually retrieved"]
+    SYN --> RCA(["RCA: root cause · evidence ·<br/>devices · timeframe · confidence"])
+
+    SQ --> QA["qa_agent<br/>answer from context;<br/>query only if needed"]
+    QA -->|"tool calls"| EXE
+    EXE -->|"Q&A turn"| QA
+    QA --> ANS(["Answer"])
+    GEN --> ANS2(["Answer"])
+```
 ## 3. Tools (all read-only, `agent/tools.py`)
 
 | Tool | Purpose |
