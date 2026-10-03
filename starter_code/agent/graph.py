@@ -27,6 +27,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from . import anomalies
 from . import db_access as db
 from .config import HISTORY_WINDOW, MAX_INVESTIGATION_STEPS, MAX_QA_STEPS, get_llm
 from .prompts import GENERAL_PROMPT, INVESTIGATOR_PROMPT, QA_PROMPT, ROUTER_PROMPT, SYNTHESIS_PROMPT
@@ -156,7 +157,7 @@ def build_graph(llm=None, checkpointer=None):
             }
         anomaly = rows[0]
         task = (f"Investigate anomaly {aid}. The anomaly record is:\n"
-                f"{json.dumps(anomaly, default=str, indent=1)}\n\n"
+                f"{json.dumps(anomalies.for_llm(anomaly), default=str, indent=1)}\n\n"
                 f"User request: {last_human(state)}")
         return {
             "anomaly": anomaly, "investigation": None, "steps": 0, "evidence_log": [],
@@ -209,7 +210,7 @@ def build_graph(llm=None, checkpointer=None):
             evidence = "\n\n".join(f"- {e['tool']}({json.dumps(e['args'], default=str)}):\n{e['preview']}"
                                    for e in state.get("evidence_log") or [])[:15000]
             context = (f"CURRENT INVESTIGATION (anomaly {state['anomaly_id']}):\n"
-                       f"Anomaly record: {json.dumps(state.get('anomaly'), default=str)}\n"
+                       f"Anomaly record: {json.dumps(anomalies.for_llm(state.get('anomaly') or {}), default=str)}\n"
                        f"RCA report: {json.dumps(inv, default=str)}\n\n"
                        f"Raw tool results gathered during the investigation (truncated):\n{evidence}")
         else:

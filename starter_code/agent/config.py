@@ -20,6 +20,9 @@ MAX_INVESTIGATION_STEPS = int(os.getenv("MAX_INVESTIGATION_STEPS", "8"))  # LLM<
 MAX_QA_STEPS = int(os.getenv("MAX_QA_STEPS", "5"))
 HISTORY_WINDOW = int(os.getenv("HISTORY_WINDOW", "10"))  # chat messages fed back to the LLM
 TOOL_OUTPUT_CHAR_LIMIT = int(os.getenv("TOOL_OUTPUT_CHAR_LIMIT", "12000"))
+# fail fast on rate limits / network problems instead of silently retrying for minutes
+LLM_MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "1"))
+LLM_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "90"))
 
 _DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
@@ -42,13 +45,16 @@ def get_llm(temperature: float = 0.0):
     if provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        return ChatGoogleGenerativeAI(model=model, temperature=temperature)
+        return ChatGoogleGenerativeAI(model=model, temperature=temperature,
+                                      max_retries=LLM_MAX_RETRIES, timeout=LLM_TIMEOUT_SECONDS)
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(model=model, temperature=temperature)
+        return ChatOpenAI(model=model, temperature=temperature,
+                          max_retries=LLM_MAX_RETRIES, timeout=LLM_TIMEOUT_SECONDS)
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        return ChatAnthropic(model=model, temperature=temperature)
+        return ChatAnthropic(model=model, temperature=temperature,
+                             max_retries=LLM_MAX_RETRIES, default_request_timeout=LLM_TIMEOUT_SECONDS)
     raise ValueError(f"Unknown LLM_PROVIDER '{provider}' (use gemini, openai or anthropic)")

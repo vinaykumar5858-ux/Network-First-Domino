@@ -92,6 +92,8 @@ def report_to_markdown(r: dict[str, Any]) -> str:
     if r.get("affected_interfaces"):
         lines.append(f"**Affected interface(s):** {', '.join(r['affected_interfaces'])}")
     lines.append(f"**Timeframe:** {r.get('timeframe_start') or '?'} -> {r.get('timeframe_end') or '?'}")
+    # markdown hard line breaks so each "**Field:**" line stays on its own line when rendered
+    lines = [ln + "  " if ln.startswith("**") and not ln.startswith("**Summary") else ln for ln in lines]
     lines += ["", "### Evidence"]
     icon = {"supports": "[+]", "contradicts": "[-]", "context": "[i]"}
     for e in r["evidence"]:

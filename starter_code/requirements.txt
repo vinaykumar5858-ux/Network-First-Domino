@@ -8,5 +8,6 @@ psycopg[binary]>=3.1        # DB_BACKEND=postgres (default)
 duckdb>=1.1                 # DB_BACKEND=duckdb (local testing without the container)
 pytz                        # needed by duckdb for timestamptz values
 pydantic>=2
+streamlit>=1.40           # web UI: streamlit run app.py
 python-dotenv>=1.0
 pytest>=8

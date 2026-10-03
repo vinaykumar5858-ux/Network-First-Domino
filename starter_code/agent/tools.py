@@ -19,14 +19,17 @@ from typing import Any
 
 from langchain_core.tools import tool
 
+from . import anomalies
 from . import db_access as db
 from .config import TOOL_OUTPUT_CHAR_LIMIT
 
 _DEVICE_KEY_CANDIDATES = ["device_id", "hostname", "device_name", "name", "mgmt_ip",
                           "management_ip", "ip_address"]
-_GROUPING_CANDIDATES = ["site", "location", "region", "pop", "data_center", "datacenter",
-                        "market", "hub", "rack", "upstream_device", "parent_device",
-                        "uplink_device", "neighbor", "peer"]
+# shared-fate relationships, most specific first (a shared WAN circuit fails together)
+_GROUPING_CANDIDATES = ["circuit_group", "upstream_device", "parent_device", "uplink_device",
+                        "neighbor", "peer", "rack", "site", "location", "pop", "data_center",
+                        "datacenter", "hub", "market", "region", "wan_provider"]
+_COMPACT_DEVICE_COLUMNS = ["hostname", "role", "device_type", "status", "site_code", "site_name"]
 
 
 # --- helpers ----------------------------------------------------------------
@@ -88,8 +91,39 @@ def _order_by(table: str) -> str:
     return " ORDER BY " + ", ".join(f'"{c}"' for c in cols) if cols else ""
 
 
-def _summarise(rows: list[dict], table: str, sample_size: int = 40) -> dict:
-    """Per-series statistics + an evenly spaced sample of rows."""
+def _onset(srows: list[dict], col: str, tcol: str | None):
+    """When did this metric first leave its baseline (the first quarter of the window)?
+
+    Works for step changes (errors jump and stay high) and drops (interfaces_up_ratio falls),
+    and ignores ordinary noise. Returns (timestamp, direction) or (None, None).
+    """
+    pts = [(r.get(tcol) if tcol else i, float(r[col])) for i, r in enumerate(srows) if r.get(col) is not None]
+    if len(pts) < 6:
+        return None, None
+    base = [v for _, v in pts[: max(3, len(pts) // 4)]]
+    bmin, bmax = min(base), max(base)
+    bmean = statistics.fmean(base)
+    vmax, vmin = max(v for _, v in pts), min(v for _, v in pts)
+    up, down = vmax - bmax, bmin - vmin
+    # the change must be material relative to the baseline level AND bigger than its normal wobble
+    floor = max(0.2 * abs(bmean), bmax - bmin) + 1e-9
+    if max(up, down) <= floor:
+        return None, None
+    if up >= down:
+        limit = bmax + 0.25 * up
+        hit = next((t for t, v in pts if v > limit), None)
+        return hit, "rise"
+    limit = bmin - 0.25 * down
+    hit = next((t for t, v in pts if v < limit), None)
+    return hit, "drop"
+
+
+def _round(row: dict) -> dict:
+    return {k: (round(v, 3) if isinstance(v, float) else v) for k, v in row.items()}
+
+
+def _summarise(rows: list[dict], table: str) -> dict:
+    """Per-series statistics (incl. when each metric left its baseline) + a compact sample."""
     if not rows:
         return {"row_count": 0}
     tcol = db.time_column(table)
@@ -112,14 +146,20 @@ def _summarise(rows: list[dict], table: str, sample_size: int = 40) -> dict:
             if not vals:
                 continue
             peak_row = max(srows, key=lambda r: float(r[c]) if r.get(c) is not None else float("-inf"))
-            entry[c] = {
-                "min": round(min(vals), 3), "max": round(max(vals), 3),
-                "mean": round(statistics.fmean(vals), 3),
-                "max_at": peak_row.get(tcol) if tcol else None,
-            }
+            onset_at, direction = _onset(srows, c, tcol)
+            entry[c] = {"min": round(min(vals), 3), "max": round(max(vals), 3),
+                        "mean": round(statistics.fmean(vals), 3),
+                        "max_at": peak_row.get(tcol) if tcol else None}
+            if onset_at is not None:
+                entry[c]["left_baseline_at"] = onset_at
+                entry[c]["change"] = direction
         stats[key] = entry
+    # keep the sample to ~300 cells so wide tables fit in the tool output
+    width = max(1, len(rows[0]))
+    sample_size = max(8, min(40, 300 // width))
     step = max(1, len(rows) // sample_size)
-    return {"row_count": len(rows), "series_stats": stats, "sample_rows": rows[::step][:sample_size]}
+    return {"row_count": len(rows), "series_stats": stats,
+            "sample_rows": [_round(r) for r in rows[::step][:sample_size]]}
 
 
 # --- tools -------------------------------------------------------------------
@@ -143,7 +183,7 @@ def get_anomaly(anomaly_id: str) -> str:
     """Fetch one detected anomaly (detector, device, time window, severity, etc.) by its id."""
     col = db.anomaly_id_column()
     rows = db.query(f'SELECT * FROM detected_anomalies WHERE "{col}"::text = %s', [anomaly_id.strip()])
-    return _dump(rows[0] if rows else {"error": f"No anomaly with id {anomaly_id}"})
+    return _dump(anomalies.for_llm(rows[0]) if rows else {"error": f"No anomaly with id {anomaly_id}"})
 
 
 @tool
@@ -157,21 +197,37 @@ def get_device_details(device: str) -> str:
 @tool
 def get_device_telemetry(device: str, start_time: str = "", end_time: str = "", metric_filter: str = "") -> str:
     """Telemetry for a device within a time window (ISO-8601, e.g. 2025-03-01T10:00:00Z).
-    Returns per-metric/interface statistics (min/max/mean, time of peak) plus sample rows.
+    Returns per-metric statistics (min/max/mean, time of peak, and `left_baseline_at`: when the
+    metric first departed from its level at the start of the window) plus sample rows.
     `metric_filter` optionally narrows to metrics/interfaces whose name contains this text.
     Tip: include some time BEFORE the anomaly to get a baseline."""
     where, params = _device_filter("device_telemetry", device)
     tf, tparams = _time_filter("device_telemetry", start_time, end_time)
     if tf:
         where, params = f"{where} AND {tf}", params + tparams
-    if metric_filter:
+    names = [c for c, _ in db.table_columns("device_telemetry")]
+    metric_cols = db.numeric_columns("device_telemetry")
+    long_format = any(c in names for c in ("metric_name", "metric"))
+    select, note = "*", ""
+    if metric_filter and long_format:  # one row per metric: filter rows by metric/interface name
         txt = db.text_columns("device_telemetry")
-        if txt:
-            where += " AND (" + " OR ".join(f'"{c}" ILIKE %s' for c in txt) + ")"
-            params += [f"%{metric_filter}%"] * len(txt)
+        where += " AND (" + " OR ".join(f'"{c}" ILIKE %s' for c in txt) + ")"
+        params += [f"%{metric_filter}%"] * len(txt)
+    elif metric_filter:  # one column per metric: keep only the matching metric columns
+        keep = [c for c in metric_cols if metric_filter.lower() in c.lower()]
+        if keep:
+            base = [c for c in names if c not in metric_cols]
+            select = ", ".join(f'"{c}"' for c in base + keep)
+        else:
+            note = f"no metric column matches '{metric_filter}' - returning all metrics"
     order = _order_by("device_telemetry")
-    rows = db.query(f"SELECT * FROM device_telemetry WHERE {where}{order}", params, limit=3000)
-    return _dump(_summarise(rows, "device_telemetry"))
+    rows = db.query(f"SELECT {select} FROM device_telemetry WHERE {where}{order}", params, limit=3000)
+    out = _summarise(rows, "device_telemetry")
+    if not long_format:
+        out["metrics_available"] = metric_cols
+    if note:
+        out["note"] = note
+    return _dump(out)
 
 
 @tool
@@ -192,7 +248,7 @@ def get_device_syslogs(device: str, start_time: str = "", end_time: str = "", ke
     rows = db.query(f"SELECT * FROM device_syslogs WHERE {where}{order}", params, limit=2000)
 
     breakdown = {}
-    for c in ("severity", "level", "facility", "event_type", "mnemonic", "category"):
+    for c in ("severity", "level", "facility", "message_type", "event_type", "mnemonic", "category"):
         if rows and c in rows[0]:
             counts: dict[str, int] = {}
             for r in rows:
@@ -214,38 +270,60 @@ def find_related_devices(device: str) -> str:
         return _dump({"error": f"Device '{device}' not found"})
     cols = dict(db.table_columns("network_devices"))
     id_col = db.device_column("network_devices") or next(iter(cols))
+    show = [id_col] + [c for c in _COMPACT_DEVICE_COLUMNS if c in cols and c != id_col]
     related: dict[str, list] = {}
-    for c in _GROUPING_CANDIDATES:
-        matches = [n for n in cols if c in n]
-        for col in matches:
-            if dev.get(col) in (None, ""):
-                continue
-            rows = db.query(
-                f'SELECT * FROM network_devices WHERE "{col}"::text = %s AND "{id_col}"::text <> %s LIMIT 25',
-                [str(dev[col]), str(dev[id_col])],
-            )
-            # devices that point at this one (e.g. upstream_device = this device)
-            related[f"{col}={dev[col]}"] = rows
-    for col in cols:
+    used: set[str] = set()
+    for cand in _GROUPING_CANDIDATES:
+        col = next((n for n in cols if cand in n and n not in used), None)
+        if not col or dev.get(col) in (None, ""):
+            continue
+        used.add(col)
+        select = ", ".join(f'"{c}"' for c in dict.fromkeys(show + [col]))
+        rows = db.query(
+            f'SELECT {select} FROM network_devices WHERE "{col}"::text = %s AND "{id_col}"::text <> %s '
+            f'ORDER BY "{id_col}" LIMIT 25',
+            [str(dev[col]), str(dev[id_col])],
+        )
+        related[f"same {col} ({dev[col]})"] = rows
+    for col in cols:  # devices that point at this one, e.g. upstream_device = this device
         if any(k in col for k in ("upstream", "parent", "uplink", "neighbor", "peer")):
-            rows = db.query(f'SELECT * FROM network_devices WHERE "{col}"::text = %s LIMIT 25', [str(dev[id_col])])
+            select = ", ".join(f'"{c}"' for c in dict.fromkeys(show + [col]))
+            rows = db.query(f'SELECT {select} FROM network_devices WHERE "{col}"::text = %s LIMIT 25',
+                            [str(dev[id_col])])
             if rows:
                 related[f"devices whose {col} is {dev[id_col]}"] = rows
-    return _dump({"device": dev, "related": related or "no shared site/upstream columns found"})
+    return _dump({"device": dev, "related": related or "no shared site/circuit/upstream columns found"})
 
 
 @tool
 def find_anomalies_in_window(start_time: str, end_time: str, device: str = "") -> str:
-    """Other detected anomalies between start_time and end_time (ISO-8601), optionally
-    for one device. Use to spot correlated or cascading events."""
-    tf, params = _time_filter("detected_anomalies", start_time, end_time)
-    where = tf or "TRUE"
+    """Other detected anomalies overlapping start_time..end_time (ISO-8601), optionally only
+    those involving one device. Use to spot correlated, shared-cause or cascading events."""
+    start = anomalies.parse_time(_check_ts(start_time)) if start_time else None
+    end = anomalies.parse_time(_check_ts(end_time)) if end_time else None
+    aliases: set[str] = set()
     if device:
-        dwhere, dparams = _device_filter("detected_anomalies", device)
-        where, params = f"{where} AND {dwhere}", params + dparams
-    order = _order_by("detected_anomalies")
-    rows = db.query(f"SELECT * FROM detected_anomalies WHERE {where}{order}", params, limit=100)
-    return _dump({"count": len(rows), "anomalies": rows})
+        aliases = {device.lower()}
+        dev = _resolve_device(device)
+        if dev:
+            aliases |= {str(dev[c]).lower() for c in _DEVICE_KEY_CANDIDATES if dev.get(c) not in (None, "")}
+    id_col = db.anomaly_id_column()
+    out = []
+    for row in db.query("SELECT * FROM detected_anomalies", limit=5000):
+        s = anomalies.summarize(row)
+        if not anomalies.overlaps(s, start, end):
+            continue
+        if aliases:
+            mentioned = {d.lower() for d in s["devices"]}
+            text = json.dumps(row, default=str).lower()
+            if not (mentioned & aliases or any(a in text for a in aliases)):
+                continue
+        out.append({"anomaly_id": row.get(id_col), "detector": s["detector"], "devices": s["devices"],
+                    "severity": s["severity"],
+                    "window_start": s["start"].isoformat() if s["start"] else None,
+                    "window_end": s["end"].isoformat() if s["end"] else None})
+    out.sort(key=lambda a: a["window_start"] or "")
+    return _dump({"count": len(out), "anomalies": out})
 
 
 @tool

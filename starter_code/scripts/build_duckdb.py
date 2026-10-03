@@ -196,81 +196,93 @@ def from_postgres(con: duckdb.DuckDBPyConnection, workdir: Path) -> None:
 
 
 DEMO_SQL = """
-CREATE TABLE network_devices (device_id VARCHAR, hostname VARCHAR, role VARCHAR, vendor VARCHAR,
-    model VARCHAR, site VARCHAR, upstream_device_id VARCHAR, os_version VARCHAR);
+-- Synthetic data in the same shape as the challenge schema (invented devices and events).
+CREATE TABLE network_devices (device_id VARCHAR, hostname VARCHAR, mgmt_ip VARCHAR, device_type VARCHAR,
+    vendor VARCHAR, model VARCHAR, role VARCHAR, site_code VARCHAR, site_name VARCHAR, city VARCHAR,
+    state VARCHAR, region VARCHAR, install_date DATE, os_version VARCHAR, status VARCHAR,
+    wan_provider VARCHAR, wan_circuit_id VARCHAR, wan_circuit_group VARCHAR, notes VARCHAR);
 INSERT INTO network_devices VALUES
- ('dev-001','edge-rtr-01','edge_router','Cisco','ASR1001-X','DFW1','dev-010','17.3.4'),
- ('dev-002','edge-rtr-02','edge_router','Cisco','ASR1001-X','DFW1','dev-010','17.3.4'),
- ('dev-010','agg-sw-01','aggregation_switch','Juniper','QFX5120','DFW1','dev-020','21.4R3'),
- ('dev-020','core-rtr-09','core_router','Juniper','MX480','DFW1',NULL,'22.1R1'),
- ('dev-030','edge-rtr-07','edge_router','Cisco','ASR1001-X','ATL2','dev-040','17.6.1'),
- ('dev-040','agg-sw-04','aggregation_switch','Juniper','QFX5120','ATL2',NULL,'21.4R3');
+ ('D-101','HARBOR-EDG01','10.20.1.1','router','Cisco','ISR4451','edge','HBR','Harbor Point','Portland','OR','West','2021-04-12','17.9.4','active','Lumen','LMN-88231','CG-WEST-2','Uplink Gi0/0/1 uses third-party optic'),
+ ('D-102','HARBOR-EDG02','10.20.1.2','router','Cisco','ISR4451','edge','HBR','Harbor Point','Portland','OR','West','2021-04-12','17.9.4','active','Lumen','LMN-88232','CG-WEST-2',NULL),
+ ('D-103','HARBOR-AGG01','10.20.1.10','switch','Arista','7050X3','aggregation','HBR','Harbor Point','Portland','OR','West','2020-09-30','4.31.2F','active',NULL,NULL,NULL,NULL),
+ ('D-201','MILLBROOK-EDG01','10.30.1.1','router','Juniper','MX204','edge','MLB','Millbrook','Boise','ID','West','2022-01-20','22.4R2','active','Zayo','ZYO-55120','CG-WEST-5',NULL),
+ ('D-301','CEDAR-CORE01','10.40.0.1','router','Juniper','MX960','core','CDR','Cedar Hub','Denver','CO','Central','2019-06-02','21.4R3','active',NULL,NULL,NULL,'Core transit node'),
+ ('D-302','CEDAR-CORE02','10.40.0.2','router','Juniper','MX960','core','CDR','Cedar Hub','Denver','CO','Central','2019-06-02','21.4R3','active',NULL,NULL,NULL,NULL);
 
-CREATE TABLE detected_anomalies (anomaly_id UUID, detector VARCHAR, device_id VARCHAR,
-    interface_name VARCHAR, severity VARCHAR, start_time TIMESTAMPTZ, end_time TIMESTAMPTZ,
-    description VARCHAR);
+CREATE TABLE detected_anomalies (anomaly_id VARCHAR, severity VARCHAR, model_output VARCHAR, anomaly_date DATE);
 INSERT INTO detected_anomalies VALUES
- ('a1f0c8e2-1b44-4d90-9c31-000000000001','interface_flap','dev-001','Gi0/0/1','major',
-  '2025-03-01 10:00:00+00','2025-03-01 10:30:00+00','Gi0/0/1 changed state 6 times in 30 minutes'),
- ('a1f0c8e2-1b44-4d90-9c31-000000000002','latency_spike','dev-020',NULL,'minor',
-  '2025-03-02 02:00:00+00','2025-03-02 02:05:00+00','p95 latency above baseline for 5 minutes'),
- ('a1f0c8e2-1b44-4d90-9c31-000000000003','bgp_session_flap','dev-030',NULL,'major',
-  '2025-03-03 14:03:00+00','2025-03-03 14:20:00+00','BGP neighbor 203.0.113.9 reset 3 times'),
- ('a1f0c8e2-1b44-4d90-9c31-000000000004','high_cpu','dev-010',NULL,'minor',
-  '2025-03-01 10:05:00+00','2025-03-01 10:25:00+00','Control-plane CPU above 85%');
+ ('a1f0c8e2-1b44-4d90-9c31-000000000001','critical',
+  '{"detector": "interface_flap", "window": {"start": "2026-06-15T06:00:00Z", "end": "2026-06-15T06:45:00Z"}, "device": "HARBOR-EDG01", "score": 0.97, "features": {"interface_flap_count": 6}}',
+  '2026-06-15'),
+ ('a1f0c8e2-1b44-4d90-9c31-000000000002','minor',
+  '{"detector": "latency_spike", "window": {"start": "2026-06-16T02:00:00Z", "end": "2026-06-16T02:05:00Z"}, "device": "CEDAR-CORE01", "score": 0.58}',
+  '2026-06-16'),
+ ('a1f0c8e2-1b44-4d90-9c31-000000000003','major',
+  '{"detector": "bgp_session_drop", "window": {"start": "2026-06-17T14:03:00Z", "end": "2026-06-17T14:25:00Z"}, "devices": ["MILLBROOK-EDG01"], "score": 0.91}',
+  '2026-06-17'),
+ ('a1f0c8e2-1b44-4d90-9c31-000000000004','warning',
+  '{"detector": "high_cpu", "window": {"start": "2026-06-15T06:05:00Z", "end": "2026-06-15T06:30:00Z"}, "device": "HARBOR-AGG01", "score": 0.74}',
+  '2026-06-15');
 
-CREATE TABLE device_telemetry (ts TIMESTAMPTZ, device_id VARCHAR, interface_name VARCHAR,
-    metric_name VARCHAR, value DOUBLE);
--- anomaly 1: optic degrades (rx power drop at 09:35), CRC errors climb from 09:40, link flaps from 10:01
+CREATE TABLE device_telemetry (device_id VARCHAR, "timestamp" TIMESTAMP, cpu_utilization_pct DOUBLE,
+    memory_utilization_pct DOUBLE, temperature_celsius DOUBLE, active_sessions INTEGER,
+    bgp_established_peers INTEGER, interfaces_up_ratio DOUBLE, interface_error_count INTEGER,
+    interface_flap_count INTEGER, policy_deny_count INTEGER, latency_ms DOUBLE, jitter_ms DOUBLE,
+    packet_loss_pct DOUBLE);
+-- anomaly 1: errors start 05:50 (degrading optic), flaps from 06:00; HARBOR-EDG02 on the same circuit is healthy
 INSERT INTO device_telemetry
- SELECT ts, 'dev-001', 'Gi0/0/1', 'rx_power_dbm',
-        CASE WHEN ts >= TIMESTAMPTZ '2025-03-01 09:35:00+00' THEN -17.8 + random() ELSE -3.2 + random() * 0.2 END
- FROM generate_series(TIMESTAMPTZ '2025-03-01 09:00:00+00', TIMESTAMPTZ '2025-03-01 11:00:00+00', INTERVAL 5 MINUTE) t(ts);
+ SELECT 'D-101', ts, 30 + random() * 5, 52 + random() * 2, 41 + random(), 1200 + floor(random() * 50)::INT, 4,
+        CASE WHEN ts BETWEEN TIMESTAMP '2026-06-15 06:00:00' AND TIMESTAMP '2026-06-15 06:40:00'
+             AND minute(ts) % 10 = 0 THEN 0.75 ELSE 1.0 END,
+        CASE WHEN ts >= TIMESTAMP '2026-06-15 05:50:00' THEN 150 + floor(random() * 250)::INT ELSE floor(random() * 3)::INT END,
+        CASE WHEN ts BETWEEN TIMESTAMP '2026-06-15 06:00:00' AND TIMESTAMP '2026-06-15 06:40:00'
+             AND minute(ts) % 10 = 0 THEN 2 ELSE 0 END,
+        floor(random() * 4)::INT,
+        CASE WHEN ts >= TIMESTAMP '2026-06-15 05:50:00' THEN 9 + random() * 6 ELSE 6 + random() END,
+        CASE WHEN ts >= TIMESTAMP '2026-06-15 05:50:00' THEN 3 + random() * 2 ELSE 0.5 + random() * 0.3 END,
+        CASE WHEN ts >= TIMESTAMP '2026-06-15 05:50:00' THEN 1.5 + random() * 2 ELSE random() * 0.05 END
+ FROM generate_series(TIMESTAMP '2026-06-15 05:00:00', TIMESTAMP '2026-06-15 07:00:00', INTERVAL 5 MINUTE) t(ts);
 INSERT INTO device_telemetry
- SELECT ts, 'dev-001', 'Gi0/0/1', 'crc_errors',
-        CASE WHEN ts >= TIMESTAMPTZ '2025-03-01 09:40:00+00' THEN 40 + floor(random() * 80) ELSE 0 END
- FROM generate_series(TIMESTAMPTZ '2025-03-01 09:00:00+00', TIMESTAMPTZ '2025-03-01 11:00:00+00', INTERVAL 5 MINUTE) t(ts);
+ SELECT 'D-102', ts, 28 + random() * 5, 50 + random() * 2, 40 + random(), 1100 + floor(random() * 50)::INT, 4,
+        1.0, floor(random() * 3)::INT, 0, floor(random() * 4)::INT, 6 + random(), 0.5 + random() * 0.3, random() * 0.05
+ FROM generate_series(TIMESTAMP '2026-06-15 05:00:00', TIMESTAMP '2026-06-15 07:00:00', INTERVAL 5 MINUTE) t(ts);
+-- anomaly 4: the aggregation switch CPU rises while processing the edge router's link churn (symptom)
 INSERT INTO device_telemetry
- SELECT ts, 'dev-001', 'Gi0/0/1', 'oper_status', CASE WHEN minute(ts) IN (5, 20) AND hour(ts) = 10 THEN 0 ELSE 1 END
- FROM generate_series(TIMESTAMPTZ '2025-03-01 09:00:00+00', TIMESTAMPTZ '2025-03-01 11:00:00+00', INTERVAL 5 MINUTE) t(ts);
--- healthy neighbour on the same aggregation switch (shows the problem is local)
+ SELECT 'D-103', ts,
+        CASE WHEN ts BETWEEN TIMESTAMP '2026-06-15 06:05:00' AND TIMESTAMP '2026-06-15 06:30:00' THEN 86 + random() * 8 ELSE 24 + random() * 5 END,
+        60 + random() * 2, 45 + random(), 0, 2, 1.0, floor(random() * 3)::INT, 0, 0, 1 + random() * 0.2, 0.2, 0
+ FROM generate_series(TIMESTAMP '2026-06-15 05:00:00', TIMESTAMP '2026-06-15 07:00:00', INTERVAL 5 MINUTE) t(ts);
+-- anomaly 2: thin evidence - latency is normal in telemetry and there are no syslogs at all
 INSERT INTO device_telemetry
- SELECT ts, 'dev-002', 'Gi0/0/1', 'crc_errors', 0
- FROM generate_series(TIMESTAMPTZ '2025-03-01 09:00:00+00', TIMESTAMPTZ '2025-03-01 11:00:00+00', INTERVAL 5 MINUTE) t(ts);
--- anomaly 4: CPU on agg-sw-01 rises while it processes edge-rtr-01's link churn (a symptom, not the cause)
+ SELECT 'D-301', ts, 40 + random() * 4, 63 + random(), 47 + random(), 5400 + floor(random() * 100)::INT, 12,
+        1.0, floor(random() * 2)::INT, 0, 0, 11 + random() * 2, 1 + random() * 0.3, random() * 0.02
+ FROM generate_series(TIMESTAMP '2026-06-16 01:30:00', TIMESTAMP '2026-06-16 02:30:00', INTERVAL 5 MINUTE) t(ts);
+-- anomaly 3: BGP peers drop right after a config change
 INSERT INTO device_telemetry
- SELECT ts, 'dev-010', NULL, 'cpu_util_pct',
-        CASE WHEN ts BETWEEN TIMESTAMPTZ '2025-03-01 10:05:00+00' AND TIMESTAMPTZ '2025-03-01 10:25:00+00'
-             THEN 86 + random() * 8 ELSE 22 + random() * 5 END
- FROM generate_series(TIMESTAMPTZ '2025-03-01 09:00:00+00', TIMESTAMPTZ '2025-03-01 11:00:00+00', INTERVAL 5 MINUTE) t(ts);
--- anomaly 2: thin evidence - latency is flat in telemetry, no syslogs at all
-INSERT INTO device_telemetry
- SELECT ts, 'dev-020', NULL, 'latency_ms_p95', 11 + random() * 2
- FROM generate_series(TIMESTAMPTZ '2025-03-02 01:30:00+00', TIMESTAMPTZ '2025-03-02 02:30:00+00', INTERVAL 5 MINUTE) t(ts);
--- anomaly 3: BGP prefixes drop after a config change
-INSERT INTO device_telemetry
- SELECT ts, 'dev-030', NULL, 'bgp_prefixes_received',
-        CASE WHEN ts >= TIMESTAMPTZ '2025-03-03 14:03:00+00' AND minute(ts) % 10 = 5 THEN 0 ELSE 812000 END
- FROM generate_series(TIMESTAMPTZ '2025-03-03 13:30:00+00', TIMESTAMPTZ '2025-03-03 14:30:00+00', INTERVAL 5 MINUTE) t(ts);
+ SELECT 'D-201', ts, 35 + random() * 4, 55 + random(), 43 + random(), 900 + floor(random() * 50)::INT,
+        CASE WHEN ts >= TIMESTAMP '2026-06-17 14:03:00' AND ts < TIMESTAMP '2026-06-17 14:25:00' THEN 1 ELSE 3 END,
+        1.0, floor(random() * 3)::INT, 0,
+        CASE WHEN ts >= TIMESTAMP '2026-06-17 14:03:00' THEN 40 + floor(random() * 20)::INT ELSE floor(random() * 4)::INT END,
+        8 + random(), 0.8 + random() * 0.3, random() * 0.05
+ FROM generate_series(TIMESTAMP '2026-06-17 13:30:00', TIMESTAMP '2026-06-17 14:45:00', INTERVAL 5 MINUTE) t(ts);
 
-CREATE TABLE device_syslogs (ts TIMESTAMPTZ, device_id VARCHAR, severity INTEGER, facility VARCHAR,
-    mnemonic VARCHAR, message VARCHAR);
+CREATE TABLE device_syslogs (log_id VARCHAR, device_id VARCHAR, "timestamp" TIMESTAMP, severity VARCHAR,
+    message_type VARCHAR, message VARCHAR);
 INSERT INTO device_syslogs VALUES
- ('2025-03-01 09:36:00+00','dev-001',4,'TRANSCEIVER','RXPOWER_LOW_WARN','Gi0/0/1: Rx power -17.6 dBm below warning threshold -14.0 dBm'),
- ('2025-03-01 09:52:00+00','dev-001',4,'IFMGR','CRC_ERRORS','Gi0/0/1: input CRC errors rising (112 in last interval)'),
- ('2025-03-01 10:01:12+00','dev-001',3,'LINK','UPDOWN','Interface GigabitEthernet0/0/1, changed state to down'),
- ('2025-03-01 10:01:40+00','dev-001',3,'LINK','UPDOWN','Interface GigabitEthernet0/0/1, changed state to up'),
- ('2025-03-01 10:08:03+00','dev-001',3,'LINK','UPDOWN','Interface GigabitEthernet0/0/1, changed state to down'),
- ('2025-03-01 10:08:31+00','dev-001',3,'LINK','UPDOWN','Interface GigabitEthernet0/0/1, changed state to up'),
- ('2025-03-01 10:21:55+00','dev-001',3,'LINK','UPDOWN','Interface GigabitEthernet0/0/1, changed state to down'),
- ('2025-03-01 10:22:20+00','dev-001',3,'LINK','UPDOWN','Interface GigabitEthernet0/0/1, changed state to up'),
- ('2025-03-01 10:06:00+00','dev-010',4,'CHASSISD','HIGH_CPU','Routing engine CPU 88% - rpd processing interface events'),
- ('2025-03-01 10:01:13+00','dev-010',5,'SNMP','LINK_DOWN','xe-0/0/5 (to edge-rtr-01) link down'),
- ('2025-03-01 10:01:41+00','dev-010',5,'SNMP','LINK_UP','xe-0/0/5 (to edge-rtr-01) link up'),
- ('2025-03-03 14:01:47+00','dev-030',5,'SYS','CONFIG_I','Configured from console by netops-jdoe on vty0 (route-map PEER-IN modified)'),
- ('2025-03-03 14:03:02+00','dev-030',3,'BGP','ADJCHANGE','neighbor 203.0.113.9 Down - Hold timer expired'),
- ('2025-03-03 14:03:30+00','dev-030',5,'BGP','ADJCHANGE','neighbor 203.0.113.9 Up'),
- ('2025-03-03 14:13:05+00','dev-030',3,'BGP','ADJCHANGE','neighbor 203.0.113.9 Down - Peer closed the session');
+ ('L-0001','D-101','2026-06-15 05:48:10','warning','TRANSCEIVER','Gi0/0/1: Rx power -16.9 dBm below low warning threshold -14.0 dBm'),
+ ('L-0002','D-101','2026-06-15 05:52:30','warning','INTERFACE','Gi0/0/1: input errors increasing (CRC 212 in last 5 min)'),
+ ('L-0003','D-101','2026-06-15 06:00:41','error','LINK','Interface GigabitEthernet0/0/1, changed state to down'),
+ ('L-0004','D-101','2026-06-15 06:01:05','notice','LINK','Interface GigabitEthernet0/0/1, changed state to up'),
+ ('L-0005','D-101','2026-06-15 06:20:12','error','LINK','Interface GigabitEthernet0/0/1, changed state to down'),
+ ('L-0006','D-101','2026-06-15 06:20:39','notice','LINK','Interface GigabitEthernet0/0/1, changed state to up'),
+ ('L-0007','D-101','2026-06-15 06:40:02','error','LINK','Interface GigabitEthernet0/0/1, changed state to down'),
+ ('L-0008','D-101','2026-06-15 06:40:30','notice','LINK','Interface GigabitEthernet0/0/1, changed state to up'),
+ ('L-0009','D-103','2026-06-15 06:06:00','warning','SYSTEM','CPU 88% - routing process handling interface events from HARBOR-EDG01'),
+ ('L-0010','D-201','2026-06-17 14:01:47','info','CONFIG','Configuration committed by netops-jdoe: route-map PEER-IN modified'),
+ ('L-0011','D-201','2026-06-17 14:03:02','error','BGP','BGP neighbor 203.0.113.9 Down - Hold timer expired'),
+ ('L-0012','D-201','2026-06-17 14:03:31','error','BGP','BGP neighbor 198.51.100.4 Down - Peer closed the session'),
+ ('L-0013','D-201','2026-06-17 14:25:10','info','CONFIG','Configuration rolled back to commit 3 by netops-jdoe'),
+ ('L-0014','D-201','2026-06-17 14:26:00','notice','BGP','BGP neighbor 203.0.113.9 Up');
 """
 
 

@@ -45,6 +45,7 @@ The agent runs against either database backend, chosen by `DB_BACKEND` in `.env`
 
 ### Commands (terminal, or the Run and Debug panel - see `.vscode/launch.json`)
 ```bash
+streamlit run app.py                                               # web UI (opens in your browser)
 python main.py --investigate a1f0c8e2-1b44-4d90-9c31-000000000001   # RCA, then chat
 python -m examples.worked_example                                  # deliverable 3
 python -m eval.run_eval --limit 10                                 # optional evaluation
@@ -52,6 +53,14 @@ python -m pytest                                                   # tests: no c
 ```
 Before submitting, run the worked example once with `DB_BACKEND=postgres` so the output comes from the
 provided environment.
+
+### Web UI
+`streamlit run app.py` opens a local chat interface on the same graph, memory and `.env` settings:
+pick an anomaly in the sidebar (filterable by detector) and press **Investigate**, watch each agent
+step live (routing, every tool call and whether it returned data), read the RCA with a colour-coded
+confidence badge and an evidence-trail table, then ask follow-ups in the chat box or use the
+suggested questions. Every answer has a "How I got this" expander with its steps. Setup problems
+(missing API key, database not found) and LLM rate limits are shown as messages, not crashes.
 
 ## 2. Architecture and why
 
@@ -106,6 +115,13 @@ guard additionally blocks DuckDB file and network functions (`read_csv`, `glob`,
 Results sort deterministically (time, then every other column), so both backends return identical
 tool output - verified on the same data.
 
+Anomaly records are read through `agent/anomalies.py`, which finds the detector, device(s) and time
+window whether they are ordinary columns or packed in a JSON column (the challenge data stores them in
+`model_output`), so the LLM, `find_anomalies_in_window`, the UI and the evaluation all see the same
+normalised summary. Telemetry statistics include `left_baseline_at` for each metric - when it first
+departed from its level at the start of the window - which lets the agent order events and separate the
+first domino from its symptoms.
+
 Column names are discovered from `information_schema` at runtime (time column, device column,
 hostname <-> id translation), so the tools are generic and not tied to one anomaly or one layout.
 
@@ -123,8 +139,8 @@ hostname <-> id translation), so the tools are generic and not tied to one anoma
 
 ## 5. Testing and evaluation
 
-- `tests/` (offline, no container or API key, 32 tests): SQL guard, calibration rules, the DDL type
-  mapping, every tool against a real DuckDB file, and graph control flow with a scripted fake LLM - investigation -> follow-up uses memory, general questions use no tools,
+- `tests/` (offline, no container or API key, 34 tests): SQL guard, calibration rules, the DDL type
+  mapping, every tool against a real DuckDB file, the web UI (headless Streamlit AppTest), and graph control flow with a scripted fake LLM - investigation -> follow-up uses memory, general questions use no tools,
   unknown ids short-circuit, zero evidence -> `insufficient`, structured-output fallback.
 - `eval/run_eval.py` runs the agent over N anomalies and reports completion, whether named devices
   exist in inventory, whether the anomaly's own device was identified, evidence-source counts,
@@ -139,7 +155,9 @@ hostname <-> id translation), so the tools are generic and not tied to one anoma
 - Topology inference uses shared site/upstream-style columns; true L2/L3 adjacency (LLDP, peer
   interfaces) is only as good as what `network_devices` contains.
 - Telemetry is summarised per series; subtle patterns (e.g. periodicity) can be missed unless the
-  LLM re-queries a narrower window.
+  LLM re-queries a narrower window. `left_baseline_at` compares against the first quarter of the
+  requested window, so the window must start before the incident, and noisy metrics can occasionally
+  be flagged.
 - `MemorySaver` is in-process; conversations are lost on restart.
 - Router mistakes are possible on ambiguous messages; the regex fast path covers explicit ids.
 - The regex fast path recognises UUID anomaly ids; other id formats rely on the LLM router.

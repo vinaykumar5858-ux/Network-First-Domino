@@ -11,36 +11,18 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 import uuid
 
 from agent import InvestigationAgent
-from agent import db_access
-
-
-_KEYS = {"gemini": ("GOOGLE_API_KEY", "GEMINI_API_KEY"), "openai": ("OPENAI_API_KEY",),
-         "anthropic": ("ANTHROPIC_API_KEY",)}
+from agent.preflight import check_environment, describe_backend, is_rate_limit
 
 
 def preflight() -> None:
     """Fail fast with a clear message instead of a stack trace."""
-    provider = os.getenv("LLM_PROVIDER", "gemini").lower()
-    keys = _KEYS.get(provider)
-    if keys is None:
-        sys.exit(f"LLM_PROVIDER='{provider}' is not supported - use gemini, openai or anthropic.")
-    if not any(os.getenv(k) for k in keys):
-        sys.exit(f"No API key for LLM_PROVIDER={provider}: set {keys[0]} in .env")
-    try:
-        db_access.query("SELECT 1 AS ok")
-    except FileNotFoundError as e:
-        sys.exit(str(e))
-    except Exception as e:
-        sys.exit(f"Cannot reach the {db_access.backend()} database: {type(e).__name__}: {e}\n"
-                 "Check the DB settings in .env (or set DB_BACKEND=duckdb to work without the container).")
-    missing = [t for t in db_access.TABLES if not db_access.table_columns(t)]
-    if missing:
-        sys.exit(f"Database is reachable but these tables are missing: {', '.join(missing)}")
+    problems = check_environment()
+    if problems:
+        sys.exit("\n".join(problems))
 
 
 def main() -> None:
@@ -51,9 +33,7 @@ def main() -> None:
     preflight()
 
     agent = InvestigationAgent(thread_id=args.thread or str(uuid.uuid4()))
-    where = (f"duckdb file {db_access.duckdb_path()}" if db_access.backend() == "duckdb"
-             else "postgres")
-    print(f"Network Investigation Agent ({where}) - type a question, an anomaly id, or /quit\n")
+    print(f"Network Investigation Agent ({describe_backend()}) - type a question, an anomaly id, or /quit\n")
 
     if args.investigate:
         print(agent.investigate(args.investigate), "\n")
@@ -77,7 +57,8 @@ def main() -> None:
         try:
             print(f"\nagent> {agent.ask(text)}\n")
         except Exception as e:  # keep the REPL alive on API/DB errors
-            print(f"\n[error] {type(e).__name__}: {e}\n")
+            hint = " (LLM rate limit - wait, or set LLM_MODEL to another model)" if is_rate_limit(e) else ""
+            print(f"\n[error]{hint} {type(e).__name__}: {str(e)[:400]}\n")
 
 
 if __name__ == "__main__":

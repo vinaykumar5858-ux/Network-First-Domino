@@ -23,6 +23,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 
+from agent import anomalies as anomaly_info
 from agent import db_access as db
 from agent.graph import build_graph
 from agent.tools import _resolve_device
@@ -57,7 +58,6 @@ def main() -> None:
 
     graph = build_graph()
     id_col = db.anomaly_id_column()
-    dev_col = db.device_column("detected_anomalies")
     labels = label_columns()
     anomalies = db.query(f"SELECT * FROM detected_anomalies LIMIT %s", [args.limit])
 
@@ -69,10 +69,11 @@ def main() -> None:
         inv = res["state"].get("investigation") or {}
         devices = inv.get("affected_devices", [])
         resolved = [_resolve_device(d) for d in devices]
-        anomaly_dev = _resolve_device(str(a[dev_col])) if dev_col and a.get(dev_col) else None
+        summary = anomaly_info.summarize(a)
+        anomaly_devs = [d for d in (_resolve_device(x) for x in summary["devices"]) if d]
         rows.append({
             "anomaly_id": aid,
-            "detector": a.get("detector") or a.get("detector_type") or a.get("anomaly_type"),
+            "detector": summary["detector"],
             "completed": bool(inv) and res["error"] is None,
             "error": res["error"],
             "seconds": res["seconds"],
@@ -81,7 +82,7 @@ def main() -> None:
             "evidence_sources": len(inv.get("evidence_sources_with_data", [])),
             "tool_calls": len(inv.get("tool_calls", [])),
             "device_grounded": bool(devices) and all(resolved),
-            "anomaly_device_hit": bool(anomaly_dev) and anomaly_dev in resolved,
+            "anomaly_device_hit": any(d in resolved for d in anomaly_devs),
             "calibration_notes": inv.get("calibration_notes"),
             "labels": {c: a.get(c) for c in labels},
         })
